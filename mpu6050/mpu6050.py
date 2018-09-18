@@ -281,7 +281,7 @@ class mpu6050:
             accel = self.get_accel_data(g=True)
             gyro  = self.get_gyro_data()
             if (i % 25 == 0):
-                print ('.', end= '', flush=True)
+                print ('.')
             ax += accel['x']
             ay += accel['y']
             az += accel['z']
@@ -303,7 +303,7 @@ class mpu6050:
         self.mean_calibrations = [ax,ay,az,gx,gy,gz]
         print ("\n** Calibration Complete **")
 
-        print ('** offsets: ',end='')
+        print ('** offsets: ')
         print(''.join('{:02.4f}  '.format(n) for n in self.mean_calibrations))
 
 if __name__ == "__main__":
