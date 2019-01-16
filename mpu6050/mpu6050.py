@@ -8,12 +8,15 @@ Copyright (c) 2015, 2016, 2017 MrTijn/Tijndagamer
 import smbus
 import time
 
-class mpu6050:
 
+class mpu6050:
     # Global Variables
     GRAVITIY_MS2 = 9.80665
     address = None
     bus = None
+
+    # Rate Divider Register
+    RATE_DIVIDER = 0x19
 
     # Scale Modifiers
     ACCEL_SCALE_MODIFIER_2G = 16384.0
@@ -38,6 +41,8 @@ class mpu6050:
     GYRO_RANGE_2000DEG = 0x18
 
     # MPU-6050 Registers
+
+    # Power Management registers
     PWR_MGMT_1 = 0x6B
     PWR_MGMT_2 = 0x6C
 
@@ -54,6 +59,10 @@ class mpu6050:
     ACCEL_CONFIG = 0x1C
     GYRO_CONFIG = 0x1B
 
+    # Interrupt registers
+    INT_ENABLE = 0x38
+    INT_STATUS = 0x3A
+
     def __init__(self, address, bus=1):
         self.address = address
         self.bus = smbus.SMBus(bus)
@@ -62,9 +71,11 @@ class mpu6050:
         # Software Calibration to zero-mean.
         # must run self.zero_mean_calibration() on level ground to properly calibrate.
         self.use_calibrated_values = False
-        self.mean_calibrations = [0,0,0,0,0,0]
+        self.mean_calibrations = [0, 0, 0, 0, 0, 0]
         # if return_gravity == FALSE, then m/s^2 are returned
         self.return_gravity = False
+        self.dplf_enabled = False
+        self.idle = False
 
     # I2C communication methods
 
@@ -80,12 +91,102 @@ class mpu6050:
 
         value = (high << 8) + low
 
-        if (value >= 0x8000):
+        if value >= 0x8000:
             return -((65535 - value) + 1)
         else:
             return value
 
     # MPU-6050 Methods
+
+    def set_sleep_mode(self):
+        """
+        set the mpu6050 in sleep mode
+        """
+        self.bus.write_byte_data(self.address, self.PWR_MGMT_1, 0b01000000)
+
+    def set_cycle_mode(self, frequency):
+        """
+        set the mpu6050 in cycle mode
+        frequency is a value between 0 and 3 inclusive which is the frequency with which to collect data from the
+        accelerometer
+
+                -------------
+                | 0 | 1.25Hz |
+                | 1 |    5Hz |
+                | 2 |   20Hz |
+                | 3 |   40Hz |
+                -------------
+        :param frequency: int between 0 and 3
+        """
+        if 0 <= frequency <= 3:
+            self.bus.write_byte_data(self.address, self.PWR_MGMT_2, frequency << 6 & 0xFF)
+            self.bus.write_byte_data(self.address, self.PWR_MGMT_1, 0b00100000)
+
+    def set_low_power_mode(self, frequency):
+        """
+        Set the mpu6050 in low power mode which means is enabled only the accelerometer and a sample is collected
+        by frequency level
+        :param frequency: int between 0 and 3
+        """
+        if 0 <= frequency <= 3:
+            self.bus.write_byte_data(self.address, self.PWR_MGMT_1, 0b00100000)
+            self.bus.write_byte_data(self.address, self.PWR_MGMT_1, 0b00101000)
+            self.bus.write_byte_data(self.address, self.PWR_MGMT_2, frequency << 6 | 0b00000111)
+
+    def set_temperature_sensor(self, enabled):
+        """
+        Enable or disable the temperature sensor
+        :param enabled: boolean
+        """
+        val = self.bus.read_byte_data(self.address, self.PWR_MGMT_1)
+        self.bus.write_byte_data(self.address, self.PWR_MGMT_1, val & 0b11111110 if enabled else val | 0b00000001)
+
+    def set_standby_axis(self, enabled):
+        """
+        Enable or disable the accelerometer and gyroscope individual axis.
+        :param enabled: list, tuple, iterable with exactly 6 elements of boolean values true means the axis is enabled
+        false mean is disabled
+        [ acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z]
+        """
+        byte = 0b00000000
+        i = 5
+        if len(enabled) != 6:
+            return
+        for val in enabled:
+            if not val:
+                byte |= 1 << i
+            i -= 1
+        self.bus.write_byte_data(self.address, self.PWR_MGMT_2, byte)
+
+    def set_int_enable(self, enabled):
+        """
+        Enable or disable the interrupt byte of the mpu6050
+        :param enabled: boolean
+        """
+        self.bus.write_byte_data(self.address, self.INT_ENABLE, 0x00)
+        if enabled:
+            self.bus.write_byte_data(self.address, self.INT_ENABLE, 0x01 & 0xFF)
+
+    def set_rate(self, rate):
+        """
+        Set the rate of how data is sampled by the mpu6050
+        :param rate: int value that represent the rate of how data is sampled in microseconds
+        rate must be a number not less than 1000 if dplf has been set or not less than 125 if dplf is disabled
+        :return: False if rate is not a legal value and True if it is
+        """
+        if self.dplf_enabled:
+            if rate < 1000:
+                return False
+        else:
+            if rate < 125:
+                return False
+        hz = 1 / rate * 1000000
+        gyrorate = 1000 if self.dplf_enabled else 8000
+        divider = int((gyrorate - hz) / hz)
+        if divider < 255:
+            self.bus.write_byte_data(self.address, self.RATE_DIVIDER, divider & 0xFF)
+            return True
+        return False
 
     def get_temp(self):
         """Reads the temperature from the onboard temperature sensor of the MPU-6050.
@@ -112,7 +213,7 @@ class mpu6050:
         # Write the new range to the ACCEL_CONFIG register
         self.bus.write_byte_data(self.address, self.ACCEL_CONFIG, accel_range)
 
-    def read_accel_range(self, raw = False):
+    def read_accel_range(self, raw=False):
         """Reads the range the accelerometer is set to.
 
         If raw is True, it will return the raw value from the ACCEL_CONFIG
@@ -136,7 +237,7 @@ class mpu6050:
             else:
                 return -1
 
-    def get_accel_data(self, g = False):
+    def get_accel_data(self, g=False):
         """Gets and returns the X, Y and Z values from the accelerometer.
 
         If g is True, it will return the data in g
@@ -192,7 +293,7 @@ class mpu6050:
         # Write the new range to the ACCEL_CONFIG register
         self.bus.write_byte_data(self.address, self.GYRO_CONFIG, gyro_range)
 
-    def read_gyro_range(self, raw = False):
+    def read_gyro_range(self, raw=False):
         """Reads the range the gyroscope is set to.
 
         If raw is True, it will return the raw value from the GYRO_CONFIG
@@ -225,7 +326,6 @@ class mpu6050:
         y = self.read_i2c_word(self.GYRO_YOUT0)
         z = self.read_i2c_word(self.GYRO_ZOUT0)
 
-        gyro_scale_modifier = None
         gyro_range = self.read_gyro_range(True)
 
         if gyro_range == self.GYRO_RANGE_250DEG:
@@ -260,28 +360,42 @@ class mpu6050:
 
         return [accel, gyro, temp]
 
-    def set_calibrated_flag(self,value=True):
-        '''
+    def set_calibrated_flag(self, value=True):
+        """
         Set to TRUE to used the calculated zero-mean calibration, FALSE
         to use the default values. Is initialized to FALSE
         :param value: boolean
-        '''
+        """
         self.use_calibrated_values = value
 
+    def set_calibration_values(self, values):
+        """
+        Load calibration mean from the dictionary values
+        :param values: a dictionary with a subset of 'ax', 'ay', 'az', 'gx', 'gy', 'gz' as keys.
+        """
+        calibration = []
+        for name in ['ax', 'ay', 'az', 'gx', 'gy', 'gz']:
+            if name in values:
+                calibration.append(values[name])
+            else:
+                calibration.append(0)
+        self.mean_calibrations = calibration
+        self.use_calibrated_values = True
+
     def zero_mean_calibration(self):
-        print ("** Calibrating the IMU **")
-        print ("** Place on level ground. re-run is not level at start **")
+        print("** Calibrating the IMU **")
+        print("** Place on level ground. re-run is not level at start **")
         # number of samples to collect. 200 == approx 5 seconds worth.
         N = 200
         # initialize the accumulators to 0
-        ax,ay,az,gx,gy,gz = [0]*6
+        ax, ay, az, gx, gy, gz = [0] * 6
 
         for i in range(N):
             # calibrate based on gravity, not m/s^2
             accel = self.get_accel_data(g=True)
-            gyro  = self.get_gyro_data()
-            if (i % 25 == 0):
-                print ('.')
+            gyro = self.get_gyro_data()
+            if i % 25 == 0:
+                print('.')
             ax += accel['x']
             ay += accel['y']
             az += accel['z']
@@ -300,11 +414,12 @@ class mpu6050:
         # compensate for 1g of gravity on 'z' axis.
         az -= 1
         # save the calibrations
-        self.mean_calibrations = [ax,ay,az,gx,gy,gz]
-        print ("\n** Calibration Complete **")
+        self.mean_calibrations = [ax, ay, az, gx, gy, gz]
+        print("\n** Calibration Complete **")
 
-        print ('** offsets: ')
+        print('** offsets: ')
         print(''.join('{:02.4f}  '.format(n) for n in self.mean_calibrations))
+
 
 if __name__ == "__main__":
     mpu = mpu6050(0x68)
