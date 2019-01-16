@@ -75,7 +75,6 @@ class mpu6050:
         # if return_gravity == FALSE, then m/s^2 are returned
         self.return_gravity = False
         self.dplf_enabled = False
-        self.idle = False
 
     # I2C communication methods
 
@@ -133,6 +132,12 @@ class mpu6050:
             self.bus.write_byte_data(self.address, self.PWR_MGMT_1, 0b00101000)
             self.bus.write_byte_data(self.address, self.PWR_MGMT_2, frequency << 6 | 0b00000111)
 
+    def full_power(self):
+        """
+        reset power byte to 0 exiting sleep or cycle mode
+        """
+        self.bus.write_byte_data(self.address, self.PWR_MGMT_1, 0x00)
+
     def set_temperature_sensor(self, enabled):
         """
         Enable or disable the temperature sensor
@@ -163,9 +168,13 @@ class mpu6050:
         Enable or disable the interrupt byte of the mpu6050
         :param enabled: boolean
         """
-        self.bus.write_byte_data(self.address, self.INT_ENABLE, 0x00)
-        if enabled:
-            self.bus.write_byte_data(self.address, self.INT_ENABLE, 0x01 & 0xFF)
+        self.bus.write_byte_data(self.address, self.INT_ENABLE, 0b00000001 if enabled else 0b00000000)
+
+    def get_int_status(self):
+        status = self.bus.read_byte_data(self.address, self.INT_STATUS)
+        if status == 0b00000001:
+            return 1
+        return 0
 
     def set_rate(self, rate):
         """
