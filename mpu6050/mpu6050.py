@@ -428,6 +428,7 @@ class mpu6050:
 
         print('** offsets: ')
         print(''.join('{:02.4f}  '.format(n) for n in self.mean_calibrations))
+        return dict(ax=ax, ay=ay, az=az, gx=gx, gy=gy, gz=gz)
 
 
 if __name__ == "__main__":
